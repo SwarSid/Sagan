@@ -157,7 +157,7 @@ Rules: 10-12 buckets, every index 0..(n-1) in exactly one bucket, counts sum to 
                 client = anthropic.Anthropic(api_key=api_key)
                 msg = client.messages.create(
                     model="claude-sonnet-4-5",
-                    max_tokens=2000,
+                    max_tokens=4096,
                     system=sys_p,
                     messages=[{"role":"user","content":user_msg}]
                 )
