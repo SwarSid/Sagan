@@ -234,7 +234,7 @@ if st.session_state.done and st.session_state.buckets:
                             bkt=next((b for b in B if b["name"]==str(val)),None)
                             if bkt:
                                 idx=B.index(bkt); hx=PALH[idx%len(PALH)]
-                                cell.fill=PatternFill("solid",fgColor=hx+"22")
+                                cell.fill=PatternFill("solid",fgColor=lighten(hx, 0.85))
                                 cell.font=Font(name="Calibri",size=10,color=hx,bold=True)
                 for cc in ws1.columns:
                     ws1.column_dimensions[get_column_letter(cc[0].column)].width=min(max(len(str(c.value or "")) for c in cc)+2,60)
@@ -273,38 +273,29 @@ if st.session_state.done and st.session_state.buckets:
                 # ── helpers ──────────────────────────────────────────────────
                 def bg_color(slide, hex_str):
                     slide.background.fill.solid()
-                    r,g,b = int(hex_str[0:2],16),int(hex_str[2:4],16),int(hex_str[4:6],16)
-                    slide.background.fill.fore_color.rgb = RGBColor(r,g,b)
+                    h=hex_str[:6]
+                    r,g,b=int(h[0:2],16),int(h[2:4],16),int(h[4:6],16)
+                    slide.background.fill.fore_color.rgb=RGBColor(r,g,b)
 
-                def R(slide,x,y,w,h,fill_hex,radius_emu=0):
-                    from pptx.util import Emu
-                    sp = slide.shapes.add_shape(
-                        1 if radius_emu==0 else 5,
-                        Inches(x),Inches(y),Inches(w),Inches(h))
-                    sp.fill.solid()
-                    sp.fill.fore_color.rgb = RGBColor.from_string(fill_hex)
-                    sp.line.fill.background()
-                    return sp
+                def lighten(hex6, factor=0.85):
+                    h=str(hex6)[:6]
+                    r,g,b=int(h[0:2],16),int(h[2:4],16),int(h[4:6],16)
+                    r=int(r+(255-r)*factor); g=int(g+(255-g)*factor); b=int(b+(255-b)*factor)
+                    return f'{min(r,255):02X}{min(g,255):02X}{min(b,255):02X}'
 
-                def RR(slide,x,y,w,h,fill_hex):
-                    """Rounded rectangle"""
-                    sp = slide.shapes.add_shape(5,Inches(x),Inches(y),Inches(w),Inches(h))
+                def R(slide,x,y,w,h,fill_hex):
+                    hex6=str(fill_hex)[:6]
+                    sp=slide.shapes.add_shape(1,Inches(x),Inches(y),Inches(w),Inches(h))
                     sp.fill.solid()
-                    sp.fill.fore_color.rgb = RGBColor.from_string(fill_hex)
+                    sp.fill.fore_color.rgb=RGBColor.from_string(hex6)
                     sp.line.fill.background()
-                    # set corner radius via XML
-                    prstGeom = sp.shape_type
-                    try:
-                        avLst = sp._element.spPr.prstGeom.avLst
-                        gd = etree.SubElement(avLst, qn('a:gd'))
-                        gd.set('name','adj'); gd.set('fmla','val 30000')
-                    except: pass
                     return sp
 
                 def oval(slide,x,y,w,h,fill_hex):
+                    hex6=str(fill_hex)[:6]
                     sp=slide.shapes.add_shape(9,Inches(x),Inches(y),Inches(w),Inches(h))
                     sp.fill.solid()
-                    sp.fill.fore_color.rgb=RGBColor.from_string(fill_hex)
+                    sp.fill.fore_color.rgb=RGBColor.from_string(hex6)
                     sp.line.fill.background()
                     return sp
 
@@ -428,7 +419,7 @@ if st.session_state.done and st.session_state.buckets:
                       sz=16,bold=True,col="FFFFFF",align=PP_ALIGN.CENTER)
 
                     # Box
-                    R(s2,step_x_box,cy-0.05,box_w,box_h,col_hex+"18")
+                    R(s2,step_x_box,cy-0.05,box_w,box_h,lighten(col_hex, 0.88))
                     R(s2,step_x_box,cy-0.05,0.07,box_h,col_hex)
 
                     nm = b["name"]
@@ -449,7 +440,7 @@ if st.session_state.done and st.session_state.buckets:
                 for i,b in enumerate(rest_s2):
                     col_hex = PALH[(i+5)%len(PALH)]
                     my = 1.5 + i*mini_h
-                    R(s2,rx_panel,my,4.8,mini_h-0.06,col_hex+"12")
+                    R(s2,rx_panel,my,4.8,mini_h-0.06,lighten(col_hex, 0.92))
                     R(s2,rx_panel,my,0.06,mini_h-0.06,col_hex)
                     T(s2,b["name"][:38],rx_panel+0.15,my+0.03,3.5,mini_h-0.12,sz=9,bold=True,col="222233")
                     T(s2,f"{b['percentage']}%",rx_panel+3.65,my+0.03,1.0,mini_h-0.12,
