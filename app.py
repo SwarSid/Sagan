@@ -196,8 +196,8 @@ CRITICAL RULES:
 - Names must be specific insight-forward labels (e.g. "PFS as Primary Efficacy Endpoint" not just "Efficacy")
 - Quotes must be verbatim text from the actual statements provided"""
 
-            # Send up to 200 statements to AI (most representative sample)
-            sample = responses[:200]
+            # Send up to 80 statements — enough for quality buckets, avoids token overflow
+            sample = responses[:80]
             user_msg = (
                 f"Background: {bg or 'Physician research on IDH mutated Glioma treatment'}\n"
                 f"Question: {question or 'Primary reasons for choosing Voranigo'}\n\n"
@@ -209,13 +209,30 @@ CRITICAL RULES:
                 client = anthropic.Anthropic(api_key=api_key)
                 msg = client.messages.create(
                     model="claude-sonnet-4-5",
-                    max_tokens=2000,
+                    max_tokens=4000,
                     system=sys_p,
                     messages=[{"role":"user","content":user_msg}]
                 )
                 raw = re.sub(r'^```json\s*','',msg.content[0].text.strip(),flags=re.I)
                 raw = re.sub(r'^```','',raw).replace('```','').strip()
-                parsed = json.loads(raw)
+                # If JSON is truncated, try to recover by finding last complete bucket
+                if not raw.endswith('}') and not raw.endswith('}]'):
+                    # Find last complete bucket object
+                    last_close = raw.rfind('}')
+                    if last_close > 0:
+                        raw = raw[:last_close+1]
+                        # Close the arrays/object
+                        open_brackets = raw.count('[') - raw.count(']')
+                        open_braces   = raw.count('{') - raw.count('}')
+                        raw += ']' * max(0, open_brackets) + '}' * max(0, open_braces)
+                try:
+                    parsed = json.loads(raw)
+                except json.JSONDecodeError:
+                    # Last resort: extract what we can with regex
+                    buckets_raw = re.findall(r'\{[^{}]*"name"[^{}]*"count"[^{}]*\}', raw, re.DOTALL)
+                    if not buckets_raw:
+                        raise ValueError("AI returned malformed JSON. Try again.")
+                    parsed = {"totalResponses": len(sample), "buckets": [json.loads(b) for b in buckets_raw]}
 
                 buckets   = parsed["buckets"]
                 total_r   = parsed["totalResponses"]
