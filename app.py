@@ -9,473 +9,525 @@ from openpyxl.styles import PatternFill, Font, Alignment
 from openpyxl.utils import get_column_letter
 import plotly.graph_objects as go
 from pptx import Presentation
-from pptx.util import Inches, Pt
+from pptx.util import Inches, Pt, Emu
 from pptx.dml.color import RGBColor
 from pptx.enum.text import PP_ALIGN
+from pptx.oxml.ns import qn
+from lxml import etree
+import math
 
-st.set_page_config(
-    page_title="Doctor Response Analyzer",
-    page_icon="⚕️",
-    layout="wide"
-)
+st.set_page_config(page_title="Doctor Response Analyzer", page_icon="⚕️", layout="wide")
 
-COLORS = [
-    "#1a2e5a","#e5333a","#f7a826","#16a34a",
-    "#7c3aed","#0891b2","#be185d","#b45309",
-    "#065f46","#1d4ed8","#9d174d","#0f766e",
-]
+COLORS = ["#1a2e5a","#e5333a","#f7a826","#16a34a","#7c3aed","#0891b2","#be185d","#b45309","#065f46","#1d4ed8","#9d174d","#0f766e"]
+PALH   = [c.replace("#","") for c in COLORS]
 
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Syne:wght@700;800&family=Inter:wght@400;500;600&display=swap');
-html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
-.top-banner {
-    background: #1a2e5a;
-    padding: 1.8rem 2rem;
-    border-radius: 14px;
-    margin-bottom: 1.5rem;
-    color: white;
-}
-.top-banner h1 { font-family: 'Syne', sans-serif; font-size: 1.8rem; font-weight: 800; margin: 0 0 4px 0; }
-.top-banner p  { margin: 0; opacity: 0.6; font-size: 13px; }
-.red-tag { display:inline-block; background:#e5333a; color:white; font-size:11px; font-weight:600; padding:2px 10px; border-radius:20px; margin-bottom:8px; }
-.qblock { border-left:3px solid #e5333a; border-radius:0 8px 8px 0; padding:9px 13px; margin:7px 0; background:#f5f4f1; font-size:13px; font-style:italic; color:#555; line-height:1.55; }
-.qbuck { font-style:normal; font-size:10px; font-weight:700; color:#e5333a; margin-top:3px; text-transform:uppercase; letter-spacing:.4px; }
-.bcard { background:white; border:1px solid rgba(0,0,0,0.08); border-radius:10px; padding:13px; border-left:4px solid #ccc; margin-bottom:7px; }
-.bpct  { font-family:'Syne',sans-serif; font-size:26px; font-weight:800; line-height:1; margin-bottom:4px; }
-.bname { font-size:13px; font-weight:600; margin-bottom:3px; }
-.btheme{ font-size:12px; color:#6b6b78; margin-bottom:7px; }
-.bquote{ font-size:11px; font-style:italic; color:#888; border-left:2px solid #e0e0e8; padding-left:7px; line-height:1.45; }
+html,body,[class*="css"]{font-family:'Inter',sans-serif}
+.banner{background:#1a2e5a;padding:1.6rem 2rem;border-radius:12px;margin-bottom:1.5rem;color:white}
+.banner h1{font-family:'Syne',sans-serif;font-size:1.7rem;font-weight:800;margin:0 0 4px}
+.banner p{margin:0;opacity:.6;font-size:13px}
+.rtag{display:inline-block;background:#e5333a;color:white;font-size:11px;font-weight:600;padding:2px 10px;border-radius:20px;margin-bottom:8px}
+.qb{border-left:3px solid #e5333a;border-radius:0 8px 8px 0;padding:9px 13px;margin:7px 0;background:#f5f4f1;font-size:13px;font-style:italic;color:#555;line-height:1.55}
+.qbk{font-style:normal;font-size:10px;font-weight:700;color:#e5333a;margin-top:3px;text-transform:uppercase;letter-spacing:.4px}
 </style>
 """, unsafe_allow_html=True)
 
 st.markdown("""
-<div class="top-banner">
-  <div class="red-tag">⚕ AI Research Tool</div>
+<div class="banner">
+  <div class="rtag">⚕ AI Research Tool</div>
   <h1>Doctor Response Analyzer</h1>
   <p>Upload responses · AI bucketing · Excel + PowerPoint export · One link for your whole team</p>
 </div>
 """, unsafe_allow_html=True)
 
-# ── API key ───────────────────────────────────────────────────────────────────
+# API key
 if "ANTHROPIC_API_KEY" in st.secrets:
     api_key = st.secrets["ANTHROPIC_API_KEY"]
 else:
-    with st.sidebar:
-        st.markdown("### API Key")
-        api_key = st.text_input("Anthropic API key", type="password",
-                                 placeholder="sk-ant-api03-...")
-        if not api_key:
-            st.warning("Enter API key to run analysis")
+    api_key = st.sidebar.text_input("Anthropic API key", type="password", placeholder="sk-ant-...")
+    if not api_key:
+        st.sidebar.warning("Add API key to run analysis")
 
-# ── Session state ─────────────────────────────────────────────────────────────
-if "buckets"       not in st.session_state: st.session_state.buckets = []
-if "total"         not in st.session_state: st.session_state.total = 0
-if "tagged_df"     not in st.session_state: st.session_state.tagged_df = None
-if "col"           not in st.session_state: st.session_state.col = None
-if "bg"            not in st.session_state: st.session_state.bg = ""
-if "question"      not in st.session_state: st.session_state.question = ""
-if "done"          not in st.session_state: st.session_state.done = False
+defaults = {"buckets":[],"total":0,"tagged_df":None,"col":None,"bg":"","question":"","done":False}
+for k,v in defaults.items():
+    if k not in st.session_state: st.session_state[k] = v
 
-# ── Step 1: Context ───────────────────────────────────────────────────────────
-with st.expander("**Step 1 — Study context** (recommended)", expanded=not st.session_state.done):
-    c1, c2 = st.columns(2)
-    with c1:
-        bg = st.text_area("Study background",
-            placeholder="e.g. Post-consultation survey with oncologists discussing VORANIGO prescribing barriers...",
-            height=90, key="bg_in")
-    with c2:
-        question = st.text_input("Question asked to doctors",
-            placeholder="e.g. What are the main barriers you face when prescribing VORANIGO?",
-            key="q_in")
+# ── Step 1 ────────────────────────────────────────────────────────────────────
+with st.expander("**Step 1 — Study context**", expanded=not st.session_state.done):
+    c1,c2 = st.columns(2)
+    bg       = c1.text_area("Study background", height=90,
+                 placeholder="e.g. Post-consultation survey with oncologists discussing VORANIGO prescribing barriers...")
+    question = c2.text_input("Question asked to doctors",
+                 placeholder="e.g. What are the main barriers to prescribing VORANIGO?")
 
-# ── Step 2: Upload ────────────────────────────────────────────────────────────
-st.markdown("### 📂 Step 2 — Upload your Excel or CSV")
-uploaded = st.file_uploader("Upload file", type=["xlsx","xls","csv"],
-                              label_visibility="collapsed")
+# ── Step 2 ────────────────────────────────────────────────────────────────────
+st.markdown("### 📂 Step 2 — Upload Excel or CSV")
+uploaded = st.file_uploader("Upload file", type=["xlsx","xls","csv"], label_visibility="collapsed")
 
-df = None
-sel_col = None
-
+df, sel_col = None, None
 if uploaded:
     try:
-        if uploaded.name.endswith(".csv"):
-            df = pd.read_csv(uploaded, dtype=str).fillna("")
-        else:
-            df = pd.read_excel(uploaded, dtype=str).fillna("")
-
+        df = pd.read_csv(uploaded, dtype=str).fillna("") if uploaded.name.endswith(".csv") else pd.read_excel(uploaded, dtype=str).fillna("")
         st.success(f"✓ **{uploaded.name}** — {len(df)} rows, {len(df.columns)} columns")
-
-        kw = ["response","answer","comment","text","doctor","feedback","reply","verbatim"]
+        kw = ["response","answer","comment","text","doctor","feedback","reply","verbatim","transcript"]
         auto = next((c for c in df.columns if any(k in c.lower() for k in kw)), df.columns[0])
-
-        sel_col = st.selectbox("Which column has the doctor responses?",
-                                df.columns.tolist(),
-                                index=df.columns.tolist().index(auto))
+        sel_col = st.selectbox("Which column has the doctor responses?", df.columns.tolist(), index=df.columns.tolist().index(auto))
         if sel_col and len(df) > 0:
-            st.caption(f'↳ Preview: *"{str(df[sel_col].iloc[0])[:160]}…"*')
+            st.caption(f'↳ *"{str(df[sel_col].iloc[0])[:160]}…"*')
     except Exception as e:
         st.error(f"Cannot read file: {e}")
 
-# ── Step 3: Run ───────────────────────────────────────────────────────────────
+# ── Step 3 ────────────────────────────────────────────────────────────────────
 st.markdown("### 🤖 Step 3 — Run AI Analysis")
 
-can_run = df is not None and sel_col is not None and bool(api_key)
-if st.button("▶ Run AI Analysis", disabled=not can_run, type="primary"):
-    responses = df[sel_col].dropna().astype(str).str.strip()
-    responses = responses[responses.str.len() > 8].tolist()
+def is_doctor_response(text):
+    if not text or len(str(text).strip()) < 15:
+        return False
+    t = str(text).strip()
+    for pat in [r'^\[GT\]\s*SPEAKER_A', r'^SPEAKER_A\s*:', r'^AI Moderator\s*:',
+                r'^Moderator\s*:', r'^Interviewer\s*:', r'Hello,?\s*doctor',
+                r'Thank you for taking the time', r'Our discussion (focuses|will focus)']:
+        if re.search(pat, t, re.IGNORECASE):
+            return False
+    if re.match(r'^[\dX_\-]+$', t): return False
+    if re.match(r'^Q\d+_', t): return False
+    return True
 
-    if len(responses) < 3:
-        st.error("Not enough text responses. Check your column selection.")
+if st.button("▶ Run AI Analysis", disabled=not (df is not None and sel_col and api_key), type="primary"):
+    all_rows = df[sel_col].astype(str).tolist()
+    doctor_indices = [(i, row) for i, row in enumerate(all_rows) if is_doctor_response(row)]
+    if len(doctor_indices) < 3:
+        st.error(f"Only {len(doctor_indices)} valid doctor responses found. Check your column selection.")
     else:
-        with st.spinner(f"Analyzing {len(responses)} responses… usually 20–40 seconds"):
+        responses = [r for _,r in doctor_indices]
+        orig_indices = [i for i,_ in doctor_indices]
+        st.info(f"Found **{len(responses)} doctor responses** (filtered out {len(all_rows)-len(responses)} moderator/metadata rows)")
+        with st.spinner(f"Analyzing {len(responses)} responses… 20–40 seconds"):
             sys_p = """You are an expert qualitative researcher for medical/pharma studies.
-Analyse the doctor responses and return ONLY valid JSON — no markdown, no backticks, no explanation.
-
+Return ONLY valid JSON — no markdown, no backticks, no explanation.
 {
   "totalResponses": <integer>,
   "buckets": [
-    {
-      "name": "<insight-forward label, 4-7 words>",
-      "count": <integer>,
-      "percentage": <number 1dp>,
-      "theme": "<one sentence core insight>",
-      "quotes": ["<verbatim 10-25 word fragment>","<another>","<third>"],
-      "responseIndices": [<0-based integers>]
-    }
+    {"name":"<4-7 word insight-forward label>","count":<int>,"percentage":<float 1dp>,
+     "theme":"<one sentence>","quotes":["<verbatim 10-25 word fragment>","<another>","<third>"],
+     "responseIndices":[<0-based ints within filtered list>]}
   ]
 }
-
-Rules: 10-12 buckets, every index 0..(n-1) in exactly one bucket, counts sum to totalResponses, percentages sum to 100.0, order by count desc, insight-forward names."""
-
+CRITICAL: 10-12 buckets, every index 0..(n-1) in exactly ONE bucket, no uncategorized, counts sum to totalResponses, percentages sum to 100.0, order by count desc."""
             sample = responses[:120]
-            user_msg = (f"Background: {bg or 'Medical research'}\n"
-                        f"Question: {question or 'Doctor experiences'}\n\n"
-                        f"Responses ({len(sample)} total):\n" +
-                        "\n".join(f"[{i}] {r}" for i, r in enumerate(sample)))
+            user_msg = (f"Background: {bg or 'Medical research'}\nQuestion: {question or 'Doctor experiences'}\n\n"
+                        f"Doctor responses ({len(sample)} total):\n" + "\n".join(f"[{i}] {r}" for i,r in enumerate(sample)))
             try:
                 client = anthropic.Anthropic(api_key=api_key)
-                msg = client.messages.create(
-                    model="claude-sonnet-4-5",
-                    max_tokens=4096,
-                    system=sys_p,
-                    messages=[{"role":"user","content":user_msg}]
-                )
-                raw = msg.content[0].text.strip()
-                raw = re.sub(r'^```json\s*','',raw,flags=re.I)
+                msg = client.messages.create(model="claude-sonnet-4-5", max_tokens=2000,
+                    system=sys_p, messages=[{"role":"user","content":user_msg}])
+                raw = re.sub(r'^```json\s*','',msg.content[0].text.strip(),flags=re.I)
                 raw = re.sub(r'^```','',raw).replace('```','').strip()
                 parsed = json.loads(raw)
-
-                buckets = parsed["buckets"]
-                total   = parsed["totalResponses"]
-
-                tagged = df.copy()
-                tagged["Bucket"] = "Uncategorized"
+                buckets = parsed["buckets"]; total_r = parsed["totalResponses"]
+                tagged = df.copy(); tagged["Bucket"] = "N/A (moderator/metadata)"
                 for b in buckets:
-                    for idx in (b.get("responseIndices") or []):
-                        if idx < len(tagged):
-                            tagged.at[idx, "Bucket"] = b["name"]
-
-                st.session_state.buckets   = buckets
-                st.session_state.total     = total
-                st.session_state.tagged_df = tagged
-                st.session_state.col       = sel_col
-                st.session_state.bg        = bg
-                st.session_state.question  = question
-                st.session_state.done      = True
+                    for fi in (b.get("responseIndices") or []):
+                        if fi < len(orig_indices): tagged.at[orig_indices[fi], "Bucket"] = b["name"]
+                st.session_state.update({"buckets":buckets,"total":total_r,"tagged_df":tagged,
+                    "col":sel_col,"bg":bg,"question":question,"done":True})
                 st.rerun()
-
             except Exception as e:
-                st.error(f"Analysis failed: {e}")
+                st.error(f"Failed: {e}")
 
 # ── Results ───────────────────────────────────────────────────────────────────
 if st.session_state.done and st.session_state.buckets:
-    buckets   = st.session_state.buckets
-    total     = st.session_state.total
+    B = st.session_state.buckets
+    total = st.session_state.total
     tagged_df = st.session_state.tagged_df
-    sel_col   = st.session_state.col
 
     st.divider()
     st.markdown("## Results")
-
     m1,m2,m3,m4 = st.columns(4)
-    m1.metric("Total Responses", total)
-    m2.metric("Buckets", len(buckets))
-    m3.metric("Largest Bucket", f"{buckets[0]['percentage']}%")
-    m4.metric("Major Themes ≥10%", sum(1 for b in buckets if b["percentage"]>=10))
+    m1.metric("Doctor Responses", total)
+    m2.metric("Buckets", len(B))
+    m3.metric("Top Bucket", f"{B[0]['percentage']}%")
+    m4.metric("Major Themes ≥10%", sum(1 for b in B if b["percentage"]>=10))
 
     t1,t2,t3,t4 = st.tabs(["📋 Table","📊 Visualize","💬 Quotes","🏷️ Tagged"])
 
-    # ── Table ─────────────────────────────────────────────────────────────────
     with t1:
-        rows = [{"#":i+1,"Bucket":b["name"],"Count":b["count"],
-                 "%":f"{b['percentage']}%","Theme":b["theme"],
-                 "Sample quote":b["quotes"][0] if b.get("quotes") else ""}
-                for i,b in enumerate(buckets)]
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame([{"#":i+1,"Bucket":b["name"],"Count":b["count"],
+            "%":f"{b['percentage']}%","Theme":b["theme"],
+            "Sample quote":b["quotes"][0] if b.get("quotes") else ""} for i,b in enumerate(B)]),
+            use_container_width=True, hide_index=True)
 
-    # ── Visualize ─────────────────────────────────────────────────────────────
     with t2:
-        viz = st.selectbox("Choose style", [
-            "Horizontal bar chart + quotes",
-            "Stat cards per bucket",
-            "Ranked driver list",
-            "Donut chart + legend",
-            "Summary table"
-        ], key="viz_pick")
-
-        names  = [b["name"] for b in buckets]
-        counts = [b["count"] for b in buckets]
-        pcts   = [b["percentage"] for b in buckets]
-        colors = [COLORS[i%len(COLORS)] for i in range(len(buckets))]
+        viz = st.selectbox("Choose style", ["Horizontal bar chart + quotes","Stat cards per bucket",
+            "Ranked driver list","Donut chart","Summary table"], key="viz_pick")
+        names=[b["name"] for b in B]; counts=[b["count"] for b in B]
+        pcts=[b["percentage"] for b in B]; colors=[COLORS[i%len(COLORS)] for i in range(len(B))]
 
         if "bar" in viz:
-            fig = go.Figure(go.Bar(
-                x=counts, y=names, orientation='h',
-                marker_color=colors,
-                text=[f"{p}% ({c})" for c,p in zip(counts,pcts)],
-                textposition='outside'
-            ))
-            fig.update_layout(
-                height=max(300,len(buckets)*40+100),
-                margin=dict(l=20,r=120,t=10,b=20),
-                yaxis=dict(autorange="reversed"),
-                plot_bgcolor='white', paper_bgcolor='white',
-                xaxis_title="Responses"
-            )
+            fig = go.Figure(go.Bar(x=counts,y=names,orientation='h',marker_color=colors,
+                text=[f"{p}% ({c})" for c,p in zip(counts,pcts)],textposition='outside'))
+            fig.update_layout(height=max(300,len(B)*42+100),margin=dict(l=20,r=140,t=10,b=20),
+                yaxis=dict(autorange="reversed"),plot_bgcolor='white',paper_bgcolor='white',
+                xaxis_title="Number of responses",font=dict(family="Inter",size=12))
             fig.update_xaxes(showgrid=True,gridcolor='#f0f0f0')
-            st.plotly_chart(fig, use_container_width=True)
-            st.markdown("**Key quotes:**")
-            for b in buckets[:3]:
+            st.plotly_chart(fig,use_container_width=True)
+            for b in B[:3]:
                 if b.get("quotes"):
-                    st.markdown(f'<div class="qblock">"{b["quotes"][0]}"<div class="qbuck">{b["name"]} · {b["percentage"]}%</div></div>', unsafe_allow_html=True)
-
+                    st.markdown(f'<div class="qb">"{b["quotes"][0]}"<div class="qbk">{b["name"]} · {b["percentage"]}%</div></div>',unsafe_allow_html=True)
         elif "cards" in viz:
-            cols = st.columns(3)
-            for i,b in enumerate(buckets):
-                col = COLORS[i%len(COLORS)]
-                q = f'<div class="bquote">"{b["quotes"][0]}"</div>' if b.get("quotes") else ""
+            cols=st.columns(3)
+            for i,b in enumerate(B):
+                c=COLORS[i%len(COLORS)]
+                q=f'<div style="font-size:11px;font-style:italic;color:#888;border-left:2px solid {c};padding-left:7px;margin-top:6px">"{b["quotes"][0]}"</div>' if b.get("quotes") else ""
                 with cols[i%3]:
-                    st.markdown(f'<div class="bcard" style="border-left-color:{col}"><div class="bpct" style="color:{col}">{b["percentage"]}%</div><div class="bname">{b["name"]}</div><div class="btheme">{b["theme"]}</div>{q}</div>', unsafe_allow_html=True)
-
+                    st.markdown(f'<div style="background:white;border:1px solid rgba(0,0,0,0.08);border-radius:10px;padding:13px;border-left:4px solid {c};margin-bottom:8px"><div style="font-size:26px;font-weight:800;color:{c};line-height:1;margin-bottom:4px">{b["percentage"]}%</div><div style="font-size:13px;font-weight:600;margin-bottom:3px">{b["name"]}</div><div style="font-size:12px;color:#6b6b78;margin-bottom:6px">{b["theme"]}</div>{q}</div>',unsafe_allow_html=True)
         elif "ranked" in viz:
-            labels = ["🔴 Most impactful","🟡 Moderate","🟢 Least impactful"]
-            splits = [int(len(buckets)*0.3), int(len(buckets)*0.7), len(buckets)]
-            prev = 0
-            for lbl,end in zip(labels,splits):
-                grp = buckets[prev:end]
-                if grp:
-                    st.markdown(f"**{lbl}**")
-                    for i,b in enumerate(grp, start=prev+1):
-                        col = COLORS[(i-1)%len(COLORS)]
-                        q = f'<div style="font-size:11px;font-style:italic;color:#888;margin-top:5px;border-left:2px solid #e0e0e8;padding-left:7px">"{b["quotes"][0]}"</div>' if b.get("quotes") else ""
-                        st.markdown(f'<div style="display:flex;align-items:flex-start;gap:12px;padding:11px 14px;background:white;border:1px solid rgba(0,0,0,0.08);border-radius:10px;margin-bottom:6px;border-left:4px solid {col}"><div style="font-family:sans-serif;font-size:18px;font-weight:800;color:{col};min-width:26px;text-align:center">{i}</div><div style="flex:1"><div style="font-size:13px;font-weight:600">{b["name"]}</div><div style="font-size:11px;color:#6b6b78">{b["theme"]}</div>{q}</div><div style="font-size:20px;font-weight:800;color:{col}">{b["percentage"]}%</div></div>', unsafe_allow_html=True)
-                prev = end
-
+            for i,b in enumerate(B):
+                c=COLORS[i%len(COLORS)]
+                impact="🔴 Most impactful" if i<int(len(B)*0.3) else "🟡 Moderate" if i<int(len(B)*0.7) else "🟢 Least impactful"
+                if i==0 or i==int(len(B)*0.3) or i==int(len(B)*0.7): st.markdown(f"**{impact}**")
+                q=f'<div style="font-size:11px;font-style:italic;color:#888;margin-top:5px;border-left:2px solid #e0e0e8;padding-left:7px">"{b["quotes"][0]}"</div>' if b.get("quotes") else ""
+                st.markdown(f'<div style="display:flex;align-items:flex-start;gap:12px;padding:11px 14px;background:white;border:1px solid rgba(0,0,0,0.08);border-radius:10px;margin-bottom:6px;border-left:4px solid {c}"><div style="font-size:18px;font-weight:800;color:{c};min-width:26px;text-align:center">{i+1}</div><div style="flex:1"><div style="font-size:13px;font-weight:600">{b["name"]}</div><div style="font-size:11px;color:#6b6b78">{b["theme"]}</div>{q}</div><div style="font-size:20px;font-weight:800;color:{c}">{b["percentage"]}%</div></div>',unsafe_allow_html=True)
         elif "donut" in viz:
-            fig = go.Figure(go.Pie(
-                labels=names, values=counts, hole=0.52,
-                marker_colors=colors, textinfo='percent'
-            ))
-            fig.update_layout(height=420,margin=dict(l=20,r=20,t=10,b=20),
-                               showlegend=True, paper_bgcolor='white')
-            st.plotly_chart(fig, use_container_width=True)
-
+            fig=go.Figure(go.Pie(labels=names,values=counts,hole=0.52,marker_colors=colors,textinfo='percent'))
+            fig.update_layout(height=420,margin=dict(l=20,r=20,t=10,b=20),showlegend=True,paper_bgcolor='white')
+            st.plotly_chart(fig,use_container_width=True)
         else:
-            for i,b in enumerate(buckets):
-                col = COLORS[i%len(COLORS)]
-                q = f'<em>"{b["quotes"][0]}"</em>' if b.get("quotes") else "—"
-                st.markdown(f'<div style="display:grid;grid-template-columns:auto 1fr auto;gap:12px;align-items:center;padding:10px 12px;background:white;border:1px solid rgba(0,0,0,0.07);border-radius:8px;margin-bottom:5px;border-left:4px solid {col}"><div style="font-size:14px;font-weight:800;color:{col};min-width:28px;text-align:center">{i+1}</div><div><div style="font-size:13px;font-weight:600">{b["name"]}</div><div style="font-size:11px;color:#888;margin-top:2px">{b["theme"]}</div><div style="font-size:11px;color:#aaa;margin-top:3px">{q}</div></div><div style="font-size:22px;font-weight:800;color:{col}">{b["percentage"]}%</div></div>', unsafe_allow_html=True)
+            for i,b in enumerate(B):
+                c=COLORS[i%len(COLORS)]
+                q=f'<em>"{b["quotes"][0]}"</em>' if b.get("quotes") else "—"
+                st.markdown(f'<div style="display:grid;grid-template-columns:auto 1fr auto;gap:12px;align-items:center;padding:10px 12px;background:white;border:1px solid rgba(0,0,0,0.07);border-radius:8px;margin-bottom:5px;border-left:4px solid {c}"><div style="font-size:14px;font-weight:800;color:{c};min-width:28px;text-align:center">{i+1}</div><div><div style="font-size:13px;font-weight:600">{b["name"]}</div><div style="font-size:11px;color:#888;margin-top:2px">{b["theme"]}</div><div style="font-size:11px;color:#aaa;margin-top:3px">{q}</div></div><div style="font-size:22px;font-weight:800;color:{c}">{b["percentage"]}%</div></div>',unsafe_allow_html=True)
 
-    # ── Quotes ────────────────────────────────────────────────────────────────
     with t3:
-        for b in buckets:
+        for b in B:
             for q in (b.get("quotes") or []):
-                st.markdown(f'<div class="qblock">"{q}"<div class="qbuck">{b["name"]} · {b["percentage"]}%</div></div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="qb">"{q}"<div class="qbk">{b["name"]} · {b["percentage"]}%</div></div>',unsafe_allow_html=True)
 
-    # ── Tagged ────────────────────────────────────────────────────────────────
     with t4:
-        st.dataframe(tagged_df, use_container_width=True, height=380)
+        na_count=(tagged_df["Bucket"]=="N/A (moderator/metadata)").sum()
+        if na_count>0: st.info(f"{na_count} rows are moderator questions or metadata — not doctor responses.")
+        st.dataframe(tagged_df,use_container_width=True,height=380)
 
     # ── Export ────────────────────────────────────────────────────────────────
     st.divider()
     st.markdown("## 📥 Export")
-    e1, e2 = st.columns(2)
+    e1,e2 = st.columns(2)
 
     with e1:
         st.markdown("#### 📊 Excel")
         if st.button("Generate Excel", type="primary", use_container_width=True):
             with st.spinner("Building Excel…"):
                 wb = Workbook()
-                ws1 = wb.active
-                ws1.title = "Responses (Bucketed)"
-                hdrs = list(tagged_df.columns)
-                for j,h in enumerate(hdrs,1):
-                    c = ws1.cell(row=1,column=j,value=h)
-                    c.font = Font(bold=True,color="FFFFFF",name="Calibri",size=10)
-                    c.fill = PatternFill("solid",fgColor="1A2E5A")
-                    c.alignment = Alignment(horizontal="center")
+                ws1 = wb.active; ws1.title = "Responses (Bucketed)"
+                for j,h in enumerate(tagged_df.columns,1):
+                    c=ws1.cell(row=1,column=j,value=h)
+                    c.font=Font(bold=True,color="FFFFFF",name="Calibri",size=10)
+                    c.fill=PatternFill("solid",fgColor="1A2E5A")
+                    c.alignment=Alignment(horizontal="center")
                 for i,row in tagged_df.iterrows():
                     for j,val in enumerate(row,1):
-                        cell = ws1.cell(row=i+2,column=j,value=str(val))
-                        cell.font = Font(name="Calibri",size=10)
-                for col_cells in ws1.columns:
-                    mx = max((len(str(c.value or "")) for c in col_cells),default=10)
-                    ws1.column_dimensions[get_column_letter(col_cells[0].column)].width = min(mx+2,50)
-
-                ws2 = wb.create_sheet("Bucket Summary")
-                hdr2 = ["Rank","Bucket","Count","%","Theme","Quote 1","Quote 2","Quote 3"]
-                for j,h in enumerate(hdr2,1):
-                    c = ws2.cell(row=1,column=j,value=h)
-                    c.font = Font(bold=True,color="FFFFFF",name="Calibri",size=10)
-                    c.fill = PatternFill("solid",fgColor="E5333A")
-                    c.alignment = Alignment(horizontal="center")
-                for i,b in enumerate(buckets):
-                    qs = b.get("quotes",[])
-                    row = [i+1,b["name"],b["count"],f"{b['percentage']}%",b["theme"],
-                           qs[0] if len(qs)>0 else "",qs[1] if len(qs)>1 else "",qs[2] if len(qs)>2 else ""]
-                    for j,v in enumerate(row,1):
-                        c = ws2.cell(row=i+2,column=j,value=v)
-                        c.font = Font(name="Calibri",size=10)
-                        c.alignment = Alignment(wrap_text=True,vertical="top")
-                ws2.column_dimensions["A"].width = 6
-                ws2.column_dimensions["B"].width = 38
-                ws2.column_dimensions["C"].width = 8
-                ws2.column_dimensions["D"].width = 10
-                ws2.column_dimensions["E"].width = 55
-                for col in ["F","G","H"]:
-                    ws2.column_dimensions[col].width = 50
-
-                buf = io.BytesIO()
-                wb.save(buf)
-                buf.seek(0)
-                st.download_button("⬇️ Download Excel", data=buf.getvalue(),
+                        cell=ws1.cell(row=i+2,column=j,value=str(val))
+                        cell.font=Font(name="Calibri",size=10)
+                        if j==len(tagged_df.columns):
+                            bkt=next((b for b in B if b["name"]==str(val)),None)
+                            if bkt:
+                                idx=B.index(bkt); hx=PALH[idx%len(PALH)]
+                                cell.fill=PatternFill("solid",fgColor=hx+"22")
+                                cell.font=Font(name="Calibri",size=10,color=hx,bold=True)
+                for cc in ws1.columns:
+                    ws1.column_dimensions[get_column_letter(cc[0].column)].width=min(max(len(str(c.value or "")) for c in cc)+2,60)
+                ws2=wb.create_sheet("Bucket Summary")
+                for j,h in enumerate(["Rank","Bucket","Count","%","Theme","Quote 1","Quote 2","Quote 3"],1):
+                    c=ws2.cell(row=1,column=j,value=h)
+                    c.font=Font(bold=True,color="FFFFFF",name="Calibri",size=10)
+                    c.fill=PatternFill("solid",fgColor="E5333A")
+                    c.alignment=Alignment(horizontal="center")
+                for i,b in enumerate(B):
+                    qs=b.get("quotes",[])
+                    for j,v in enumerate([i+1,b["name"],b["count"],f"{b['percentage']}%",b["theme"],
+                        qs[0] if len(qs)>0 else "",qs[1] if len(qs)>1 else "",qs[2] if len(qs)>2 else ""],1):
+                        c=ws2.cell(row=i+2,column=j,value=v)
+                        c.font=Font(name="Calibri",size=10)
+                        c.alignment=Alignment(wrap_text=True,vertical="top")
+                for col_letter,width in zip(["A","B","C","D","E","F","G","H"],[6,38,8,10,55,50,50,50]):
+                    ws2.column_dimensions[col_letter].width=width
+                buf=io.BytesIO(); wb.save(buf); buf.seek(0)
+                st.download_button("⬇️ Download Excel",data=buf.getvalue(),
                     file_name="doctor_responses_bucketed.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True)
 
     with e2:
-        st.markdown("#### 📑 PowerPoint")
+        st.markdown("#### 📑 PowerPoint — 4 slides auto-generated")
+        st.caption("Slide 1: Big stat infographic · Slide 2: Numbered arch cards · Slide 3: Bar chart + quotes · Slide 4: Full table")
         if st.button("Generate PowerPoint", type="primary", use_container_width=True):
-            with st.spinner("Building PowerPoint…"):
+            with st.spinner("Building 4-slide deck…"):
+
                 prs = Presentation()
                 prs.slide_width  = Inches(13.33)
                 prs.slide_height = Inches(7.5)
                 blank = prs.slide_layouts[6]
 
-                def rect(slide,x,y,w,h,fill):
-                    s = slide.shapes.add_shape(1,Inches(x),Inches(y),Inches(w),Inches(h))
-                    s.fill.solid()
-                    s.fill.fore_color.rgb = RGBColor.from_string(fill)
-                    s.line.fill.background()
-                    return s
+                # ── helpers ──────────────────────────────────────────────────
+                def bg_color(slide, hex_str):
+                    slide.background.fill.solid()
+                    r,g,b = int(hex_str[0:2],16),int(hex_str[2:4],16),int(hex_str[4:6],16)
+                    slide.background.fill.fore_color.rgb = RGBColor(r,g,b)
 
-                def txt(slide,text,x,y,w,h,sz=12,bold=False,col="000000",italic=False,align=PP_ALIGN.LEFT):
-                    tb = slide.shapes.add_textbox(Inches(x),Inches(y),Inches(w),Inches(h))
-                    tb.word_wrap = True
-                    tf = tb.text_frame
-                    tf.word_wrap = True
-                    p  = tf.paragraphs[0]
-                    p.alignment = align
-                    run = p.add_run()
-                    run.text = text
-                    run.font.size   = Pt(sz)
-                    run.font.bold   = bold
-                    run.font.italic = italic
-                    run.font.color.rgb = RGBColor.from_string(col)
+                def R(slide,x,y,w,h,fill_hex,radius_emu=0):
+                    from pptx.util import Emu
+                    sp = slide.shapes.add_shape(
+                        1 if radius_emu==0 else 5,
+                        Inches(x),Inches(y),Inches(w),Inches(h))
+                    sp.fill.solid()
+                    sp.fill.fore_color.rgb = RGBColor.from_string(fill_hex)
+                    sp.line.fill.background()
+                    return sp
 
-                # Cover
+                def RR(slide,x,y,w,h,fill_hex):
+                    """Rounded rectangle"""
+                    sp = slide.shapes.add_shape(5,Inches(x),Inches(y),Inches(w),Inches(h))
+                    sp.fill.solid()
+                    sp.fill.fore_color.rgb = RGBColor.from_string(fill_hex)
+                    sp.line.fill.background()
+                    # set corner radius via XML
+                    prstGeom = sp.shape_type
+                    try:
+                        avLst = sp._element.spPr.prstGeom.avLst
+                        gd = etree.SubElement(avLst, qn('a:gd'))
+                        gd.set('name','adj'); gd.set('fmla','val 30000')
+                    except: pass
+                    return sp
+
+                def oval(slide,x,y,w,h,fill_hex):
+                    sp=slide.shapes.add_shape(9,Inches(x),Inches(y),Inches(w),Inches(h))
+                    sp.fill.solid()
+                    sp.fill.fore_color.rgb=RGBColor.from_string(fill_hex)
+                    sp.line.fill.background()
+                    return sp
+
+                def T(slide,text,x,y,w,h,sz=12,bold=False,col="000000",italic=False,align=PP_ALIGN.LEFT,wrap=True):
+                    tb=slide.shapes.add_textbox(Inches(x),Inches(y),Inches(w),Inches(h))
+                    tb.word_wrap=wrap; tf=tb.text_frame; tf.word_wrap=wrap
+                    p=tf.paragraphs[0]; p.alignment=align
+                    run=p.add_run(); run.text=str(text)
+                    run.font.size=Pt(sz); run.font.bold=bold; run.font.italic=italic
+                    run.font.color.rgb=RGBColor.from_string(col)
+
+                def add_line(slide,x1,y1,x2,y2,col_hex,width_pt=1.5):
+                    from pptx.util import Inches, Pt
+                    import pptx.oxml as oxml
+                    connector = slide.shapes.add_connector(1,Inches(x1),Inches(y1),Inches(x2),Inches(y2))
+                    connector.line.color.rgb = RGBColor.from_string(col_hex)
+                    connector.line.width = Pt(width_pt)
+
+                question_txt = st.session_state.question or "Key Themes from Doctor Responses"
+                bg_txt = st.session_state.bg or ""
+
+                # ════════════════════════════════════════════════════════════
+                # SLIDE 1 — Bold stat infographic  (dark bg, big % cards)
+                # Like the "pentagon/arch" style but as bold stat blocks
+                # ════════════════════════════════════════════════════════════
                 s1 = prs.slides.add_slide(blank)
-                s1.background.fill.solid()
-                s1.background.fill.fore_color.rgb = RGBColor(15,15,24)
-                rect(s1,0,0,0.22,7.5,"E5333A")
-                txt(s1,"DOCTOR RESPONSE ANALYSIS",0.46,1.8,9,0.4,sz=10,bold=True,col="E5333A")
-                txt(s1,st.session_state.question or "Qualitative Research Insights",0.46,2.3,9.5,1.1,sz=28,bold=True,col="FFFFFF")
-                if st.session_state.bg:
-                    txt(s1,st.session_state.bg[:110],0.46,3.75,9,0.6,sz=12,italic=True,col="9898B8")
-                rect(s1,0.46,5.0,2.0,0.85,"1A2E5A")
-                txt(s1,str(total),0.46,5.0,0.9,0.85,sz=28,bold=True,col="FFFFFF",align=PP_ALIGN.CENTER)
-                txt(s1,"responses",1.4,5.0,1.1,0.85,sz=10,col="8888AA")
-                rect(s1,2.8,5.0,2.0,0.85,"1A2E5A")
-                txt(s1,str(len(buckets)),2.8,5.0,0.9,0.85,sz=28,bold=True,col="FFFFFF",align=PP_ALIGN.CENTER)
-                txt(s1,"buckets",3.7,5.0,1.1,0.85,sz=10,col="8888AA")
+                bg_color(s1,"0F0F1E")
 
-                # Chart slide — horizontal bars drawn as shapes
+                # Left red accent
+                R(s1,0,0,0.18,7.5,"E5333A")
+
+                # Title
+                T(s1,"PHYSICIAN RESEARCH INSIGHTS",0.38,0.28,9,0.32,sz=9,bold=True,col="E5333A")
+                T(s1,question_txt,0.38,0.65,9.5,0.95,sz=26,bold=True,col="FFFFFF")
+                if bg_txt:
+                    T(s1,bg_txt[:110]+(("…") if len(bg_txt)>110 else ""),0.38,1.7,9,0.5,sz=11,italic=True,col="8888AA")
+
+                # Top 5 arch-style bold cards
+                top5 = B[:5]
+                card_colors = ["E5333A","1a2e5a","F7A826","16A34A","7C3AED"]
+                cw,ch = 2.42, 2.1
+                gap   = 0.14
+                total_row_w = len(top5)*(cw+gap)-gap
+                sx = (13.33 - total_row_w)/2
+
+                for i,b in enumerate(top5):
+                    bx = sx + i*(cw+gap)
+                    by = 2.4
+                    col_hex = card_colors[i%len(card_colors)]
+
+                    # Card background
+                    R(s1,bx,by,cw,ch,col_hex)
+
+                    # Big percentage
+                    T(s1,f"{b['percentage']}%",bx,by+0.1,cw,0.75,
+                      sz=36,bold=True,col="FFFFFF",align=PP_ALIGN.CENTER)
+
+                    # Count pill
+                    R(s1,bx+cw/2-0.45,by+0.82,0.9,0.28,"FFFFFF")
+                    T(s1,f"n = {b['count']}",bx+cw/2-0.45,by+0.82,0.9,0.28,
+                      sz=9,bold=True,col=col_hex,align=PP_ALIGN.CENTER)
+
+                    # Bucket name
+                    nm = b["name"][:30]+("…" if len(b["name"])>30 else "")
+                    T(s1,nm,bx+0.1,by+1.18,cw-0.2,0.68,
+                      sz=10,bold=True,col="FFFFFF",align=PP_ALIGN.CENTER)
+
+                # Remaining buckets as smaller strip
+                rest = B[5:12]
+                if rest:
+                    rw = (13.33-0.56)/len(rest)
+                    for i,b in enumerate(rest):
+                        rx = 0.38 + i*rw
+                        col_hex = PALH[(i+5)%len(PALH)]
+                        R(s1,rx,4.72,rw-0.1,1.62,col_hex)
+                        T(s1,f"{b['percentage']}%",rx,4.77,rw-0.1,0.55,
+                          sz=20,bold=True,col="FFFFFF",align=PP_ALIGN.CENTER)
+                        nm2 = b["name"][:20]+("…" if len(b["name"])>20 else "")
+                        T(s1,nm2,rx+0.04,5.32,rw-0.18,0.78,sz=8,col="CCCCEE",align=PP_ALIGN.CENTER)
+
+                T(s1,f"n = {total} physician responses  ·  {len(B)} themes identified",
+                  0,6.9,13.33,0.3,sz=9,col="444460",align=PP_ALIGN.CENTER)
+
+                # ════════════════════════════════════════════════════════════
+                # SLIDE 2 — Numbered steps infographic
+                # Circles with numbers + coloured boxes with name/% /quote
+                # Inspired by the numbered arch/steps template layout
+                # ════════════════════════════════════════════════════════════
                 s2 = prs.slides.add_slide(blank)
-                s2.background.fill.solid()
-                s2.background.fill.fore_color.rgb = RGBColor(255,255,255)
-                txt(s2,"RESPONSE DISTRIBUTION",0.4,0.25,8,0.3,sz=8,bold=True,col="E5333A")
-                txt(s2,st.session_state.question or "Themes ranked by frequency",0.4,0.58,12.5,0.45,sz=17,bold=True,col="0F0F18")
+                bg_color(s2,"FFFFFF")
 
-                n = len(buckets)
-                top = 1.2
-                avail_h = 5.9
-                rh = avail_h / n
-                max_c = max(b["count"] for b in buckets) or 1
+                T(s2,"TOP THEMES — RANKED",0.5,0.2,12,0.3,sz=8,bold=True,col="E5333A")
+                T(s2,question_txt,0.5,0.52,12.33,0.48,sz=18,bold=True,col="0F0F18")
 
-                for i,b in enumerate(buckets):
-                    ch = COLORS[i%len(COLORS)].replace("#","")
-                    bw = (b["count"]/max_c)*6.2
-                    yp = top + i*rh
-                    lbl = b["name"][:38]+("…" if len(b["name"])>38 else "")
-                    txt(s2,lbl,0.3,yp+0.01,3.6,rh-0.04,sz=8,col="333344")
-                    rect(s2,4.1,yp+rh*0.22,6.5,rh*0.52,"F4F3F0")
-                    if bw>0.05:
-                        rect(s2,4.1,yp+rh*0.22,bw,rh*0.52,ch)
-                    txt(s2,f"{b['percentage']}% ({b['count']})",4.15+bw,yp+0.01,2.0,rh-0.04,sz=8,bold=True,col=ch)
+                # Draw top 5 as numbered vertical steps with connector line
+                top5_s2 = B[:5]
+                step_colors = ["E5333A","F7A826","1A2E5A","16A34A","7C3AED"]
+                circle_r = 0.42
+                step_x_circle = 0.7
+                step_x_box    = 1.5
+                box_w         = 5.5
+                box_h         = 0.95
+                step_y_start  = 1.2
+                step_gap      = 1.12
 
-                # Quote callouts
-                top_qs = [(b,b["quotes"][0]) for b in buckets[:3] if b.get("quotes")]
-                rect(s2,11.1,1.2,2.0,5.9,"F4F3F0")
-                txt(s2,"KEY QUOTES",11.2,1.32,1.8,0.24,sz=7,bold=True,col="E5333A")
-                qy_list = [1.72,3.07,4.42]
-                for idx,(b,q) in enumerate(top_qs[:3]):
-                    ch = COLORS[idx%len(COLORS)].replace("#","")
-                    rect(s2,11.2,qy_list[idx],0.05,0.88,ch)
-                    txt(s2,f'"{q[:85]}{"…" if len(q)>85 else ""}"',11.3,qy_list[idx]+0.02,1.6,0.7,sz=8,italic=True,col="333344")
-                    txt(s2,f"— {b['name'][:25]}",11.3,qy_list[idx]+0.72,1.6,0.2,sz=7,bold=True,col=ch)
+                for i,b in enumerate(top5_s2):
+                    col_hex = step_colors[i%len(step_colors)]
+                    cy = step_y_start + i*step_gap
 
-                # Full table slide
+                    # Connector line between circles (except last)
+                    if i < len(top5_s2)-1:
+                        add_line(s2, step_x_circle+circle_r/2,
+                                    cy+circle_r,
+                                    step_x_circle+circle_r/2,
+                                    cy+step_gap,
+                                    "DDDDDD", 1.0)
+
+                    # Circle
+                    oval(s2,step_x_circle,cy,circle_r,circle_r,col_hex)
+                    T(s2,str(i+1),step_x_circle,cy,circle_r,circle_r,
+                      sz=16,bold=True,col="FFFFFF",align=PP_ALIGN.CENTER)
+
+                    # Box
+                    R(s2,step_x_box,cy-0.05,box_w,box_h,col_hex+"18")
+                    R(s2,step_x_box,cy-0.05,0.07,box_h,col_hex)
+
+                    nm = b["name"]
+                    T(s2,nm,step_x_box+0.18,cy,box_w-0.5,0.35,sz=11,bold=True,col="0F0F18")
+                    T(s2,b["theme"][:65],step_x_box+0.18,cy+0.34,box_w-0.5,0.34,sz=9,italic=True,col="555566")
+
+                    # Percentage badge on right
+                    R(s2,step_x_box+box_w+0.1,cy+0.1,0.85,0.55,col_hex)
+                    T(s2,f"{b['percentage']}%",step_x_box+box_w+0.1,cy+0.1,0.85,0.55,
+                      sz=14,bold=True,col="FFFFFF",align=PP_ALIGN.CENTER)
+
+                # Right panel: remaining buckets 6-12 as mini list
+                rx_panel = 8.0
+                T(s2,"OTHER THEMES",rx_panel,1.1,4.8,0.3,sz=8,bold=True,col="E5333A")
+
+                rest_s2 = B[5:]
+                mini_h  = min(0.62, 5.5/max(len(rest_s2),1))
+                for i,b in enumerate(rest_s2):
+                    col_hex = PALH[(i+5)%len(PALH)]
+                    my = 1.5 + i*mini_h
+                    R(s2,rx_panel,my,4.8,mini_h-0.06,col_hex+"12")
+                    R(s2,rx_panel,my,0.06,mini_h-0.06,col_hex)
+                    T(s2,b["name"][:38],rx_panel+0.15,my+0.03,3.5,mini_h-0.12,sz=9,bold=True,col="222233")
+                    T(s2,f"{b['percentage']}%",rx_panel+3.65,my+0.03,1.0,mini_h-0.12,
+                      sz=11,bold=True,col=col_hex,align=PP_ALIGN.RIGHT)
+
+                # ════════════════════════════════════════════════════════════
+                # SLIDE 3 — Horizontal bar chart + quote callouts
+                # ════════════════════════════════════════════════════════════
                 s3 = prs.slides.add_slide(blank)
-                s3.background.fill.solid()
-                s3.background.fill.fore_color.rgb = RGBColor(244,243,240)
-                txt(s3,"ALL BUCKETS",0.4,0.25,9,0.28,sz=8,bold=True,col="E5333A")
-                txt(s3,f"All {len(buckets)} themes ranked",0.4,0.56,9,0.38,sz=15,bold=True,col="0F0F18")
-                cxs = [0.4,0.85,3.7,4.35,4.9]
-                cws = [0.42,2.82,0.62,0.52,7.8]
-                hdrs3 = ["#","Bucket","Count","%","Theme"]
-                hy = 1.1
-                for j,(lbl,cx,cw) in enumerate(zip(hdrs3,cxs,cws)):
-                    rect(s3,cx,hy,cw,0.32,"1A2E5A")
-                    txt(s3,lbl,cx+0.04,hy+0.03,cw-0.08,0.26,sz=9,bold=True,col="FFFFFF")
-                trh = min(0.36,(7.5-hy-0.5)/(len(buckets)+1))
-                for i,b in enumerate(buckets):
-                    ry = hy+0.32+i*trh
-                    bg_c = "FFFFFF" if i%2==0 else "F9F8F6"
-                    ch   = COLORS[i%len(COLORS)].replace("#","")
-                    for cx,cw in zip(cxs,cws):
-                        rect(s3,cx,ry,cw,trh,bg_c)
-                    txt(s3,str(i+1),cxs[0]+0.04,ry+0.02,0.32,trh-0.04,sz=9,col="888888")
-                    txt(s3,b["name"],cxs[1]+0.04,ry+0.02,cws[1]-0.08,trh-0.04,sz=9,bold=True,col=ch)
-                    txt(s3,str(b["count"]),cxs[2]+0.04,ry+0.02,cws[2]-0.08,trh-0.04,sz=9,col="333344")
-                    txt(s3,f"{b['percentage']}%",cxs[3]+0.04,ry+0.02,cws[3]-0.08,trh-0.04,sz=9,bold=True,col=ch)
-                    txt(s3,b["theme"][:80],cxs[4]+0.04,ry+0.02,cws[4]-0.08,trh-0.04,sz=8,italic=True,col="555566")
+                bg_color(s3,"FFFFFF")
 
-                buf2 = io.BytesIO()
-                prs.save(buf2)
-                buf2.seek(0)
-                st.download_button("⬇️ Download PowerPoint", data=buf2.getvalue(),
+                T(s3,"RESPONSE DISTRIBUTION",0.5,0.22,8,0.28,sz=8,bold=True,col="E5333A")
+                T(s3,question_txt,0.5,0.52,12.5,0.48,sz=17,bold=True,col="0F0F18")
+                T(s3,f"All {len(B)} themes  ·  n = {total} responses",
+                  0.5,1.02,8,0.26,sz=9,italic=True,col="888899")
+
+                n=len(B); rh=5.3/n; max_c=max(b["count"] for b in B) or 1
+                for i,b in enumerate(B):
+                    col_hex=PALH[i%len(PALH)]
+                    bw=(b["count"]/max_c)*5.6
+                    yp=1.38+i*rh
+                    lbl=b["name"][:36]+("…" if len(b["name"])>36 else "")
+                    T(s3,lbl,0.5,yp+0.01,3.4,rh-0.04,sz=8,col="222233")
+                    R(s3,4.0,yp+rh*0.18,5.8,rh*0.6,"F4F3F0")
+                    if bw>0.05: R(s3,4.0,yp+rh*0.18,bw,rh*0.6,col_hex)
+                    T(s3,f"{b['percentage']}%  n={b['count']}",
+                      4.08+bw,yp+0.01,2.2,rh-0.04,sz=8,bold=True,col=col_hex)
+
+                # Quote panel
+                R(s3,10.08,1.38,3.08,5.82,"F7F6F3")
+                T(s3,"KEY QUOTES",10.22,1.5,2.8,0.24,sz=7,bold=True,col="E5333A")
+                top_qs=[(b,b["quotes"][0]) for b in B[:3] if b.get("quotes")]
+                for idx,(b,q) in enumerate(top_qs[:3]):
+                    col_hex=PALH[idx%len(PALH)]
+                    qy=1.88+idx*1.38
+                    R(s3,10.22,qy,0.05,0.85,col_hex)
+                    T(s3,f'"{q[:88]}{"…" if len(q)>88 else ""}"',
+                      10.32,qy+0.02,2.6,0.68,sz=8,italic=True,col="333344")
+                    T(s3,f"— {b['name'][:26]}",10.32,qy+0.7,2.6,0.2,sz=7,bold=True,col=col_hex)
+
+                # ════════════════════════════════════════════════════════════
+                # SLIDE 4 — Full colour-coded table
+                # ════════════════════════════════════════════════════════════
+                s4 = prs.slides.add_slide(blank)
+                bg_color(s4,"F7F6F3")
+
+                T(s4,"FULL BREAKDOWN",0.5,0.22,9,0.28,sz=8,bold=True,col="E5333A")
+                T(s4,f"All {len(B)} themes ranked by frequency",0.5,0.54,9,0.38,sz=15,bold=True,col="0F0F18")
+                T(s4,f"n = {total} physician responses",0.5,0.96,5,0.26,sz=9,italic=True,col="888899")
+
+                cxs=[0.5,0.98,3.88,4.56,5.18]; cws=[0.44,2.86,0.64,0.58,7.54]
+                hy=1.3
+                for lbl,cx,cw in zip(["#","Bucket","Count","%","Core theme"],cxs,cws):
+                    R(s4,cx,hy,cw,0.36,"1A2E5A")
+                    T(s4,lbl,cx+0.05,hy+0.04,cw-0.1,0.28,sz=9,bold=True,col="FFFFFF")
+
+                trh=min(0.37,(7.5-hy-0.5)/(len(B)+1))
+                for i,b in enumerate(B):
+                    ry=hy+0.36+i*trh
+                    bg_c="FFFFFF" if i%2==0 else "F2F1EE"
+                    col_hex=PALH[i%len(PALH)]
+                    for cx,cw in zip(cxs,cws): R(s4,cx,ry,cw,trh,bg_c)
+                    T(s4,str(i+1),cxs[0]+0.05,ry+0.03,0.34,trh-0.06,sz=9,col="888888")
+                    T(s4,b["name"],cxs[1]+0.05,ry+0.03,cws[1]-0.1,trh-0.06,sz=9,bold=True,col=col_hex)
+                    T(s4,str(b["count"]),cxs[2]+0.05,ry+0.03,cws[2]-0.1,trh-0.06,sz=9,col="333344")
+                    T(s4,f"{b['percentage']}%",cxs[3]+0.05,ry+0.03,cws[3]-0.1,trh-0.06,sz=9,bold=True,col=col_hex)
+                    T(s4,b["theme"][:85],cxs[4]+0.05,ry+0.03,cws[4]-0.1,trh-0.06,sz=8,italic=True,col="555566")
+
+                buf2=io.BytesIO(); prs.save(buf2); buf2.seek(0)
+                st.download_button("⬇️ Download PowerPoint",data=buf2.getvalue(),
                     file_name="doctor_response_analysis.pptx",
                     mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
                     use_container_width=True)
 
     st.divider()
-    if st.button("↺ Start new analysis"):
-        for k in ["buckets","total","tagged_df","col","bg","question","done"]:
-            st.session_state[k] = None
-        st.session_state.done = False
-        st.session_state.buckets = []
+    if st.button("↺ New analysis"):
+        for k,v in defaults.items(): st.session_state[k] = v
         st.rerun()
 
 st.markdown("---")
-st.markdown("<div style='text-align:center;font-size:11px;color:#aaa'>Doctor Response Analyzer · Powered by Claude · No data stored</div>", unsafe_allow_html=True)
+st.markdown("<div style='text-align:center;font-size:11px;color:#aaa'>Doctor Response Analyzer · Powered by Claude · No data stored</div>",unsafe_allow_html=True)
